@@ -1,57 +1,39 @@
 import graph_tool.all as gt
 import polars as pl
 import numpy as np
-import random
+import os
 from collections import defaultdict
 import scipy.stats as st
-import os
 from tqdm import tqdm
 
-# test setup
-WEEK = 1
-TRACKING_FILE = f"nfl-big-data-bowl-2025/tracking_week_{WEEK}.csv"
-PLAYERS_FILE  = "nfl-big-data-bowl-2025/players.csv"
-PBP_FILE      = "pbp_2022.csv"
+# all weeks config
+WEEKS = range(1, 10)
+PLAYERS_FILE = "nfl-big-data-bowl-2025/players.csv"
+PBP_FILE     = "pbp_2022.csv"
 
 GOOD_THRESHOLD = 0.25
 BAD_THRESHOLD  = -0.25
 
-print("Loading tracking and player data...")
-players  = pl.read_csv(PLAYERS_FILE)
-tracking = pl.read_csv(
-    TRACKING_FILE,
-    null_values=["NA","na","N/A","n/a","NULL","null","None","none"]
+
+pbp = (
+    pl.read_csv(
+       PBP_FILE,
+       null_values=["NA","na","N/A","n/a","NULL","null","None","none"],
+       infer_schema_length=10000,
+       schema_overrides={"total_line": pl.Float64}
+    )
+    .with_columns([
+        (-pl.col("epa")).alias("def_epa"),
+        pl.col("game_date").str.strptime(pl.Date, "%Y-%m-%d")
+    ])
 )
 
-if not os.path.isfile(PBP_FILE):
-    raise FileNotFoundError(f"Missing play-by-play data: {PBP_FILE}")
-
-
-pbp = pl.read_csv(
-    PBP_FILE,
-    null_values=["NA","na","N/A","n/a","NULL","null","None","none"],
-    infer_schema_length=10000,
-    schema_overrides={"total_line": pl.Float64}
-).with_columns([
-    (-pl.col("epa")).alias("def_epa"),
-    pl.col("game_date").str.strptime(pl.Date, "%Y-%m-%d")
-])
-
-# Build a lookup table
 epa_lookup = (
     pbp
     .select(["play_id", "game_date", "def_epa"])
     .unique()
     .rename({"play_id": "playId"})
 )
-
-tracking = tracking.with_columns([
-    pl.col("gameId")
-      .cast(pl.Utf8)
-      .str.slice(0, 8)
-      .str.strptime(pl.Date, "%Y%m%d")
-      .alias("game_date")
-])
 
 # helpers
 def group_rows_by_frame(rows, gameId, playId):
@@ -112,8 +94,8 @@ def compute_metrics(g):
     gc    = gt.global_clustering(g, weight=w)[0]
     lc    = gt.local_clustering(g, weight=w)
     nV, nE = g.num_vertices(), g.num_edges()
-    density = nE / (nV * (nV-1) / 2) if nV > 1 else 0
-    avg_w = sum(w[e] for e in g.edges()) / nE if nE > 0 else 0
+    density = nE / (nV*(nV-1)/2) if nV>1 else 0
+    avg_w = sum(w[e] for e in g.edges()) / nE if nE>0 else 0
 
     strength = g.new_vertex_property("float")
     for v in g.vertices():
@@ -126,7 +108,7 @@ def compute_metrics(g):
     for v_id in sorted(rank[:int(nV*0.2)], reverse=True):
         g2.remove_vertex(v_id)
     _, hist = gt.label_components(g2)
-    rob = max(hist) / g2.num_vertices() if g2.num_vertices() > 0 else 0
+    rob = max(hist) / g2.num_vertices() if g2.num_vertices()>0 else 0
 
     return {
       "avg_betweenness": vb.a.mean(),
@@ -147,62 +129,66 @@ def compute_metrics(g):
 def analyze_batch(df):
     results = []
     pairs = list(df.select(["gameId","playId"]).unique().iter_rows())
-    total_plays = len(pairs)
-
-    for g_id, p_id in tqdm(
-        pairs,
-        total=total_plays,
-        desc="Analyzing plays",
-        unit="plays",
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-    ):
-        grp = df.filter(
-            (pl.col("gameId")==g_id) & (pl.col("playId")==p_id)
-        )
-        graphs  = construct_graph(list(grp.iter_rows()), g_id, p_id)
-        metrics = [compute_metrics(gx) for gx in graphs]
-        avg = {k: np.mean([m[k] for m in metrics]) for k in metrics[0]}
-        std = {f"{k}_std": np.std([m[k] for m in metrics]) for k in metrics[0]}
+    for g_id, p_id in tqdm(pairs, total=len(pairs), desc="Analyzing plays", unit="plays"):
+        grp = df.filter((pl.col("gameId")==g_id)&(pl.col("playId")==p_id))
+        metrics = [compute_metrics(gx) for gx in construct_graph(list(grp.iter_rows()), g_id, p_id)]
+        avg   = {k: np.mean([m[k] for m in metrics]) for k in metrics[0]}
+        std   = {f"{k}_std": np.std([m[k] for m in metrics]) for k in metrics[0]}
         results.append({"gameId": g_id, "playId": p_id, **avg, **std})
-
     return pl.DataFrame(results)
 
+# loop (weeks 1-9)
+all_good = []
+all_bad  = []
+all_sum  = []
 
-tracks = tracking.join(epa_lookup, on=["playId","game_date"])
+for wk in WEEKS:
+    print(f"\n=== WEEK {wk} ===")
+    fn = f"nfl-big-data-bowl-2025/tracking_week_{wk}.csv"
+    tracking = pl.read_csv(fn, null_values=["NA","na","N/A","n/a","NULL","null","None","none"])
+    tracking = tracking.with_columns([
+        pl.col("gameId").cast(pl.Utf8).str.slice(0,8).str.strptime(pl.Date, "%Y%m%d").alias("game_date")
+    ])
 
-good = tracks.filter(pl.col("def_epa") >= GOOD_THRESHOLD)
-bad  = tracks.filter(pl.col("def_epa") <= BAD_THRESHOLD)
+    tracks = tracking.join(epa_lookup, on=["playId","game_date"])
+    good   = tracks.filter(pl.col("def_epa") >= GOOD_THRESHOLD)
+    bad    = tracks.filter(pl.col("def_epa") <= BAD_THRESHOLD)
 
-print("Analyzing high-impact (good) plays...")
-good_metrics = analyze_batch(good)
-print("Analyzing high-impact (bad) plays...")
-bad_metrics  = analyze_batch(bad)
+    good_met = analyze_batch(good).with_columns([
+        pl.lit(wk).alias("week")
+    ])
+    bad_met  = analyze_batch(bad).with_columns([
+        pl.lit(wk).alias("week")
+    ])
 
-# summary
-metric_cols = [
-    c for c in good_metrics.columns
-    if not c.endswith("_std") and c not in ["gameId","playId"]
-]
-summary = []
-for m in metric_cols:
-    t, p = st.ttest_ind(
-        good_metrics[m].to_numpy(),
-        bad_metrics[m].to_numpy(),
-        equal_var=False
-    )
-    summary.append({
-        "metric": m,
-        "good_mean": good_metrics[m].mean(),
-        "bad_mean": bad_metrics[m].mean(),
-        "t_stat": t,
-        "p_value": p
-    })
-summary_df = pl.DataFrame(summary)
-print("\nMetric comparison (good vs bad plays):")
-print(summary_df)
 
-good_metrics.write_csv("good_week1_metrics.csv")
-bad_metrics.write_csv("bad_week1_metrics.csv")
-summary_df.write_csv("summary_week1.csv")
+    # t-tests for this week alone
+    summary = []
+    metric_cols = [c for c in good_met.columns if not c.endswith("_std") and c not in ["gameId","playId","week"]]
+    for m in metric_cols:
+        t, p = st.ttest_ind(good_met[m].to_numpy(), bad_met[m].to_numpy(), equal_var=False)
+        summary.append({
+            "week": wk,
+            "metric": m,
+            "good_mean": good_met[m].mean(),
+            "bad_mean": bad_met[m].mean(),
+            "t_stat": t,
+            "p_value": p
+        })
+    sum_df = pl.DataFrame(summary)
 
-print("Analysis complete.")
+    all_good.append(good_met)
+    all_bad.append(bad_met)
+    all_sum.append(sum_df)
+
+# merge everything
+good_all = pl.concat(all_good)
+bad_all  = pl.concat(all_bad)
+sum_all  = pl.concat(all_sum)
+
+# save
+good_all.write_csv("good_weeks1-9_metrics.csv")
+bad_all.write_csv("bad_weeks1-9_metrics.csv")
+sum_all.write_csv("summary_weeks1-9.csv")
+
+print("\nDone! Results written to CSV.")
