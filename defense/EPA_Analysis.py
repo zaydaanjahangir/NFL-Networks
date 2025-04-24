@@ -14,7 +14,7 @@ PBP_FILE     = "pbp_2022.csv"
 GOOD_THRESHOLD = 0.25
 BAD_THRESHOLD  = -0.25
 
-
+# preload PBP & EPA lookup
 pbp = (
     pl.read_csv(
        PBP_FILE,
@@ -139,6 +139,7 @@ def analyze_batch(df):
 
 # loop (weeks 1-9)
 all_good = []
+all_avg  = []
 all_bad  = []
 all_sum  = []
 
@@ -151,44 +152,49 @@ for wk in WEEKS:
     ])
 
     tracks = tracking.join(epa_lookup, on=["playId","game_date"])
-    good   = tracks.filter(pl.col("def_epa") >= GOOD_THRESHOLD)
-    bad    = tracks.filter(pl.col("def_epa") <= BAD_THRESHOLD)
+    bad     = tracks.filter(pl.col("def_epa") <= BAD_THRESHOLD)
+    avg     = tracks.filter((pl.col("def_epa") > BAD_THRESHOLD) & (pl.col("def_epa") < GOOD_THRESHOLD))
+    good    = tracks.filter(pl.col("def_epa") >= GOOD_THRESHOLD)
 
-    good_met = analyze_batch(good).with_columns([
-        pl.lit(wk).alias("week")
-    ])
-    bad_met  = analyze_batch(bad).with_columns([
-        pl.lit(wk).alias("week")
-    ])
+    bad_met  = analyze_batch(bad).with_columns([pl.lit("bad").alias("group"),
+                                                pl.lit(wk).alias("week")])
+    avg_met  = analyze_batch(avg).with_columns([pl.lit("average").alias("group"),
+                                                pl.lit(wk).alias("week")])
+    good_met = analyze_batch(good).with_columns([pl.lit("good").alias("group"),
+                                                 pl.lit(wk).alias("week")])
 
-
-    # t-tests for this week alone
+    # week-by-week t-tests between all three groups 
     summary = []
-    metric_cols = [c for c in good_met.columns if not c.endswith("_std") and c not in ["gameId","playId","week"]]
+    metric_cols = [c for c in good_met.columns 
+                   if not c.endswith("_std") and c not in ["gameId","playId","week","group"]]
     for m in metric_cols:
-        t, p = st.ttest_ind(good_met[m].to_numpy(), bad_met[m].to_numpy(), equal_var=False)
+        t_gb, p_gb = st.ttest_ind(good_met[m].to_numpy(), bad_met[m].to_numpy(), equal_var=False)
+        t_ga, p_ga = st.ttest_ind(good_met[m].to_numpy(), avg_met[m].to_numpy(), equal_var=False)
+        t_ab, p_ab = st.ttest_ind(avg_met[m].to_numpy(), bad_met[m].to_numpy(), equal_var=False)
         summary.append({
             "week": wk,
             "metric": m,
-            "good_mean": good_met[m].mean(),
-            "bad_mean": bad_met[m].mean(),
-            "t_stat": t,
-            "p_value": p
+            "good_vs_bad_t":   t_gb, "good_vs_bad_p":   p_gb,
+            "good_vs_avg_t":   t_ga, "good_vs_avg_p":   p_ga,
+            "avg_vs_bad_t":    t_ab, "avg_vs_bad_p":    p_ab,
         })
     sum_df = pl.DataFrame(summary)
 
-    all_good.append(good_met)
     all_bad.append(bad_met)
+    all_avg.append(avg_met)
+    all_good.append(good_met)
     all_sum.append(sum_df)
 
 # merge everything
-good_all = pl.concat(all_good)
 bad_all  = pl.concat(all_bad)
+avg_all  = pl.concat(all_avg)
+good_all = pl.concat(all_good)
 sum_all  = pl.concat(all_sum)
 
 # save
-good_all.write_csv("good_weeks1-9_metrics.csv")
 bad_all.write_csv("bad_weeks1-9_metrics.csv")
-sum_all.write_csv("summary_weeks1-9.csv")
+avg_all.write_csv("average_weeks1-9_metrics.csv")
+good_all.write_csv("good_weeks1-9_metrics.csv")
+sum_all.write_csv("summary_weeks1-9_three_cohorts.csv")
 
-print("\nDone! Results written to CSV.")
+print("\nDone! Three‐cohort results written to CSV.")
