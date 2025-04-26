@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**NFL Network Analysis** applies complex network techniques to NFL tracking and play-by-play data from the 2022 season.  We build both offensive influence networks and defensive dynamic play networks to uncover structural features that correlate with play success.  By computing and analyzing centrality, clustering, density, and robustness metrics, we identify the players and formations most responsible for high-impact plays on both sides of the ball.
+**NFL Network Analysis** applies complex network techniques to NFL tracking and play-by-play data from the 2022 season.  We build both influence networks and dynamic play networks to uncover structural features that correlate with play success.  By computing and analyzing centrality, clustering, density, and robustness metrics, we identify the players and formations most responsible for high-impact plays on both sides of the ball.
 
 ## Key Features
 
